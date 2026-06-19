@@ -3,8 +3,11 @@
 
 # Data sources
 fredapi==0.5.1        # FRED API client
-yfinance==0.2.54      # Yahoo Finance market data
-curl_cffi>=0.7.0      # Browser-impersonating session for yfinance (avoids Yahoo 429 rate-limiting)
+yfinance>=1.4.1       # Yahoo Finance market data. 1.x bundles curl_cffi and
+                      # impersonates a browser internally (avoids 429 rate-limiting).
+                      # Older 0.2.x breaks on newer curl_cffi: "'str' object has no
+                      # attribute 'name'". Do NOT pass a custom session to yf.download.
+curl_cffi>=0.15       # Pulled in by yfinance; pinned here so the impersonation backend is present.
 
 # HTTP & environment
 requests>=2.31.0      # World Bank API + FRED calendar

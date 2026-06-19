@@ -132,15 +132,10 @@ WORLD_BANK_INDICATORS = {
     "NY.GDP.MKTP.KD.ZG": ("GDP growth, annual %",  ["US", "JP", "GB", "DE", "CN"]),
 }
 
-# Freshness thresholds (hours) — if data is older, it is flagged STALE
-FRESHNESS_LIMITS = {
-    "equity":     4,
-    "fx":         4,
-    "crypto":     4,
-    "commodity":  4,
-    "us_macro":   36,   # daily FRED series; monthly/quarterly exempt by design
-    "intl_macro": 168,  # 7 days (CB rates change infrequently)
-}
+# Staleness is judged per-series in check_freshness() from each series' own
+# observation cadence (see compute_baselines → "cadence_days"), measured in days.
+# This dict is kept only as documentation of the asset categories in use.
+FRESHNESS_CATEGORIES = ("equity", "fx", "crypto", "commodity", "us_macro", "intl_macro")
 
 # Upcoming economic releases to track (FRED release IDs)
 FRED_RELEASE_IDS = {
@@ -182,23 +177,30 @@ def bps_change(current, prior) -> str:
     return "N/A"
 
 
-def check_freshness(data_date_str: str, category: str) -> dict:
+def check_freshness(data_date_str: str, category: str, cadence_days: int = 1) -> dict:
     """
-    Compare data timestamp against freshness threshold for its category.
-    Returns dict: {is_stale: bool, reason: str, last_updated: str}
+    Decide whether a series' latest reading is stale, in DAYS relative to how
+    often the series actually updates (`cadence_days`, inferred from its history).
+
+    Why days, not hours: every series here is a DAILY/monthly/quarterly bar dated
+    at the session/period (midnight), so an hours-based limit would flag even
+    today's data as "4h+ old". A daily series (cadence 1) tolerates ~6 days (so a
+    Friday close is still fresh the following week and weekends/holidays don't trip
+    it); a monthly series (cadence ~30) tolerates ~3 months; quarterly proportionally.
+    `category` is kept for the report/flagging but no longer drives the threshold.
     """
     try:
-        # Accept both date-only and datetime strings
         clean = data_date_str[:10]  # take YYYY-MM-DD portion
-        data_dt = datetime.strptime(clean, "%Y-%m-%d")
-        data_dt = JST.localize(data_dt)
-        age_hours = (datetime.now(JST) - data_dt).total_seconds() / 3600
-        limit = FRESHNESS_LIMITS.get(category, 24)
+        data_date = datetime.strptime(clean, "%Y-%m-%d").date()
+        age_days  = (datetime.now(JST).date() - data_date).days
 
-        if age_hours > limit:
+        # Allowed age = a few publication cycles + weekend/holiday grace.
+        allowed = max(6, int(cadence_days) * 3 + 3)
+
+        if age_days > allowed:
             return {
                 "is_stale":    True,
-                "reason":      f"Data is {age_hours:.1f}h old (limit: {limit}h)",
+                "reason":      f"Data is {age_days}d old (cadence ~{cadence_days}d, limit {allowed}d)",
                 "last_updated": data_date_str,
             }
         return {"is_stale": False, "last_updated": data_date_str}
@@ -235,6 +237,18 @@ def compute_baselines(series, unit: str) -> dict:
         {"date": str(idx.date()), "value": round(float(val), 6)}
         for idx, val in tail.items()
     ]
+
+    # Infer how often this series updates (median day-gap of recent readings),
+    # so check_freshness can judge staleness against the right cadence:
+    # ~1 for daily bars, ~30 for monthly, ~90 for quarterly.
+    idx = series.index
+    if len(idx) >= 3:
+        recent = idx[-12:]
+        gaps = [(recent[i] - recent[i - 1]).days for i in range(1, len(recent))]
+        gaps = sorted(g for g in gaps if g > 0)
+        result["cadence_days"] = gaps[len(gaps) // 2] if gaps else 1
+    else:
+        result["cadence_days"] = 1
 
     # Change function: bps for rates/yields, % for everything else
     delta_fn = bps_change if unit == "percent" else pct_change
@@ -317,7 +331,7 @@ def fetch_fred() -> dict:
                 continue
 
             baselines = compute_baselines(series, unit)
-            freshness = check_freshness(baselines["as_of"], category)
+            freshness = check_freshness(baselines["as_of"], category, baselines.get("cadence_days", 1))
 
             results[series_id] = {
                 "label":      label,
@@ -340,27 +354,6 @@ def fetch_fred() -> dict:
 # 4. YFINANCE FETCHER
 # ─────────────────────────────────────────────────────────────────
 
-def _build_yf_session():
-    """
-    Return a browser-impersonating curl_cffi session.
-
-    Yahoo Finance rate-limits (HTTP 429) the default `requests` TLS
-    fingerprint/User-Agent, which causes every ticker to fail with
-    YFRateLimitError. A curl_cffi session impersonating Chrome passes
-    Yahoo's checks. Returns None if curl_cffi is unavailable (yfinance
-    then falls back to its default session and may be rate-limited).
-    """
-    try:
-        from curl_cffi import requests as cffi_requests
-        return cffi_requests.Session(impersonate="chrome")
-    except ImportError:
-        log.warning(
-            "curl_cffi not installed — Yahoo Finance may rate-limit (HTTP 429). "
-            "Install with: pip install curl_cffi"
-        )
-        return None
-
-
 def fetch_yfinance() -> dict:
     """
     Fetch market prices for all tickers in YFINANCE_TICKERS.
@@ -375,11 +368,14 @@ def fetch_yfinance() -> dict:
         log.error("yfinance not installed. Run: pip install yfinance")
         return {"_error": "yfinance not installed"}
 
-    session = _build_yf_session()
     tickers_str = " ".join(YFINANCE_TICKERS.keys())
 
-    # threads=False + a browser-impersonating session avoids the connection-pool
-    # exhaustion and 429 rate-limiting that previously failed every ticker.
+    # NOTE: do NOT pass a custom `session=`. yfinance >= 1.x bundles curl_cffi
+    # and impersonates a browser internally to avoid Yahoo's 429 rate-limiting.
+    # Passing our own curl_cffi session previously broke on a curl_cffi cookie-API
+    # change ("'str' object has no attribute 'name'"); letting yfinance manage its
+    # own session keeps it in sync with the curl_cffi version yfinance pins.
+    # threads=False avoids connection-pool exhaustion across the 14-ticker batch.
     raw = None
     log.info("  Downloading batch price data from Yahoo Finance...")
     for attempt in range(1, 4):
@@ -392,7 +388,6 @@ def fetch_yfinance() -> dict:
                 auto_adjust=True,
                 progress=False,
                 threads=False,
-                session=session,
             )
             if raw is not None and not raw.empty:
                 break
@@ -428,7 +423,7 @@ def fetch_yfinance() -> dict:
                 single = yf.download(
                     ticker, period="400d", interval="1d",
                     auto_adjust=True, progress=False,
-                    threads=False, session=session,
+                    threads=False,
                 )
                 close_series = single["Close"].dropna() if not single.empty else None
 
@@ -438,7 +433,7 @@ def fetch_yfinance() -> dict:
                 continue
 
             baselines = compute_baselines(close_series, unit="price")
-            freshness = check_freshness(baselines["as_of"], category)
+            freshness = check_freshness(baselines["as_of"], category, baselines.get("cadence_days", 1))
 
             results[ticker] = {
                 "label":      label,
