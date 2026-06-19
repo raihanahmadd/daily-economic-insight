@@ -1,0 +1,14 @@
+# Economic Intelligence System — Dependencies
+# Install with: pip install -r requirements.txt
+
+# Data sources
+fredapi==0.5.1        # FRED API client
+yfinance==0.2.54      # Yahoo Finance market data
+
+# HTTP & environment
+requests>=2.31.0      # World Bank API + FRED calendar
+python-dotenv>=1.0.0  # Load .env API keys
+
+# Time & data handling
+pytz>=2024.1          # JST timezone support
+pandas>=2.0.0         # Time series manipulation (required by yfinance)

@@ -1,0 +1,28 @@
+# ── Secrets — NEVER commit ──────────────────────────────
+.env
+
+# ── Python virtual environment & caches ─────────────────
+.venv/
+env/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# ── Local editor / agent settings ───────────────────────
+.claude/
+.vscode/
+.idea/
+
+# ── Generated run artifacts (regenerated every run) ─────
+logs/
+data/
+
+# ── OS cruft ────────────────────────────────────────────
+Thumbs.db
+.DS_Store
+
+# NOTE: charts/ and reports/ ARE tracked as sample outputs.
+# To keep this a code-only repo, uncomment the two lines below:
+# charts/
+# reports/
