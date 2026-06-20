@@ -81,7 +81,11 @@ log = logging.getLogger(__name__)
 # 1. CONFIGURATION — All indicators defined in Output Contract v2
 # ─────────────────────────────────────────────────────────────────
 
-FRED_API_KEY = os.getenv("FRED_API_KEY")
+FRED_API_KEY      = os.getenv("FRED_API_KEY")
+# Optional: CoinGecko free "Demo" key unlocks higher rate limits for the /global
+# endpoint. The endpoint also works keyless (stricter limits), so Tier-2 dominance
+# degrades gracefully when this is unset.
+COINGECKO_API_KEY = os.getenv("COINGECKO_API_KEY")
 
 # FRED series → (human label, category, unit)
 # unit: "percent" → changes reported in bps; "index"/"billions_usd" → reported as %
@@ -93,6 +97,7 @@ FRED_SERIES = {
     "CPIAUCSL":         ("CPI (All Urban, All Items)","us_macro",   "index"),
     "CPILFESL":         ("Core CPI (ex Food/Energy)", "us_macro",   "index"),
     "GDP":              ("Real GDP (quarterly)",      "us_macro",   "billions_usd"),
+    "DFII10":           ("10Y Real Yield (TIPS)",     "us_macro",   "percent"),
     # ── International CB Rates (available via FRED) ───
     "ECBDFR":           ("ECB Deposit Rate",          "intl_macro", "percent"),
     # UK: SONIA daily rate tracks the BOE Bank Rate within a few bps.
@@ -134,8 +139,13 @@ WORLD_BANK_INDICATORS = {
 
 # Staleness is judged per-series in check_freshness() from each series' own
 # observation cadence (see compute_baselines → "cadence_days"), measured in days.
-# This dict is kept only as documentation of the asset categories in use.
-FRESHNESS_CATEGORIES = ("equity", "fx", "crypto", "commodity", "us_macro", "intl_macro")
+# This tuple is kept only as documentation of the asset categories in use.
+# crypto_* categories are intraday (funding settles 3x/day), so check_freshness
+# measures their staleness in HOURS via an explicit timestamp.
+FRESHNESS_CATEGORIES = (
+    "equity", "fx", "crypto", "commodity", "us_macro", "intl_macro",
+    "crypto_derivatives", "crypto_liquidity", "crypto_vol",
+)
 
 # Upcoming economic releases to track (FRED release IDs).
 # IDs verified against the FRED /release endpoint — the previous set was wrong
@@ -184,22 +194,39 @@ def bps_change(current, prior) -> str:
     return "N/A"
 
 
-def check_freshness(data_date_str: str, category: str, cadence_days: int = 1) -> dict:
+def check_freshness(data_date_str: str, category: str, cadence_days: float = 1, as_of_ts: float = None) -> dict:
     """
-    Decide whether a series' latest reading is stale, in DAYS relative to how
-    often the series actually updates (`cadence_days`, inferred from its history).
+    Decide whether a series' latest reading is stale, relative to how often the
+    series actually updates (`cadence_days`, inferred from its history).
 
-    Why days, not hours: every series here is a DAILY/monthly/quarterly bar dated
-    at the session/period (midnight), so an hours-based limit would flag even
-    today's data as "4h+ old". A daily series (cadence 1) tolerates ~6 days (so a
-    Friday close is still fresh the following week and weekends/holidays don't trip
-    it); a monthly series (cadence ~30) tolerates ~3 months; quarterly proportionally.
-    `category` is kept for the report/flagging but no longer drives the threshold.
+    Two granularities:
+      • Sub-day cadence (e.g. crypto funding settles every 8h → cadence ~0.33) is
+        judged in HOURS against an explicit `as_of_ts` (epoch seconds), tolerating
+        ~3 settlement cycles. This is why a 0.33 cadence is not truncated to 0.
+      • Daily/monthly/quarterly bars are judged in DAYS: every such bar is dated at
+        the session/period (midnight), so an hours-based limit would flag even
+        today's data as "4h+ old". Daily (cadence 1) tolerates ~6 days (Friday close
+        stays fresh the following week); monthly (~30) ~3 months; quarterly likewise.
     """
     try:
+        now = datetime.now(JST)
+
+        # ── Intraday series: measure in hours against the real timestamp ──
+        if cadence_days < 1 and as_of_ts is not None:
+            data_dt   = datetime.fromtimestamp(as_of_ts, JST)
+            age_hours = (now - data_dt).total_seconds() / 3600
+            allowed_h = max(12, cadence_days * 24 * 3)  # ~3 update cycles, floor 12h
+            if age_hours > allowed_h:
+                return {
+                    "is_stale":    True,
+                    "reason":      f"Data is {age_hours:.1f}h old (cadence ~{cadence_days*24:.0f}h, limit {allowed_h:.0f}h)",
+                    "last_updated": data_date_str,
+                }
+            return {"is_stale": False, "last_updated": data_date_str}
+
         clean = data_date_str[:10]  # take YYYY-MM-DD portion
         data_date = datetime.strptime(clean, "%Y-%m-%d").date()
-        age_days  = (datetime.now(JST).date() - data_date).days
+        age_days  = (now.date() - data_date).days
 
         # Allowed age = a few publication cycles + weekend/holiday grace.
         allowed = max(6, int(cadence_days) * 3 + 3)
@@ -577,6 +604,231 @@ def fetch_economic_calendar() -> list:
     return upcoming
 
 # ─────────────────────────────────────────────────────────────────
+# 6B. CRYPTO-NATIVE QUANT DATA (derivatives, liquidity, volatility)
+# ─────────────────────────────────────────────────────────────────
+
+def _http_get_json(url: str, headers: dict = None, attempts: int = 3):
+    """
+    GET JSON with the same retry/backoff used by fetch_yfinance() — 3 attempts,
+    sleep 3 * attempt between them. Raises the last exception if all fail.
+    """
+    last_exc = None
+    for attempt in range(1, attempts + 1):
+        try:
+            resp = requests.get(url, headers=headers, timeout=12)
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            last_exc = e
+            if attempt < attempts:
+                time.sleep(3 * attempt)
+    raise last_exc
+
+
+def _crypto_entry(label, category, points, unit, source, source_url,
+                  cadence_days, as_of_ts, no_ytd=False):
+    """
+    Build a crypto data point in the same shape as fred_data/market_data entries.
+    `points` is a list of (epoch_seconds, value); compute_baselines() does the rest.
+    Funding/LS ratios have no meaningful YTD/1Y baseline → no_ytd sets them to N/A.
+    """
+    import pandas as pd
+    idx    = pd.to_datetime([p[0] for p in points], unit="s")
+    series = pd.Series([p[1] for p in points], index=idx).dropna()
+    if series.empty:
+        raise ValueError("empty series")
+
+    baselines = compute_baselines(series, unit=unit)
+    baselines["cadence_days"] = cadence_days  # explicit (intraday gaps infer poorly)
+    if no_ytd:
+        baselines["change_ytd"] = "N/A"
+        baselines["change_1y"]  = "N/A"
+
+    freshness = check_freshness(baselines["as_of"], category, cadence_days, as_of_ts)
+    return {
+        "label":      label,
+        "category":   category,
+        "unit":       unit,
+        "source":     source,
+        "source_url": source_url,
+        "freshness":  freshness,
+        **baselines,
+    }
+
+
+def fetch_crypto_data() -> dict:
+    """
+    Crypto-native quant signals — same Output Contract shape as fetch_fred() /
+    fetch_yfinance(). Each source is fetched independently so one failure can't
+    take down the rest; failures land as {label, category, error} (counted by
+    validate_output) rather than crashing the pipeline.
+
+      Tier 1 (no key): Binance funding / OI / long-short ratio, Bybit funding x-check
+      Tier 2:          CoinGecko dominance, DeFiLlama stablecoin supply, Deribit DVOL
+      Tier 3:          Spot ETF net flow → explicit not-implemented stub
+    """
+    results = {}
+    BINANCE = "https://fapi.binance.com"
+    SYMS    = [("BTCUSDT", "BTC"), ("ETHUSDT", "ETH")]
+
+    # ── Bybit funding (fetched first, used as cross-check on Binance funding) ──
+    bybit_funding = {}
+    for sym, tag in SYMS:
+        try:
+            d = _http_get_json(f"https://api.bybit.com/v5/market/funding/history"
+                               f"?category=linear&symbol={sym}&limit=1")
+            row = d.get("result", {}).get("list", [{}])[0]
+            bybit_funding[tag] = float(row["fundingRate"]) * 100
+        except Exception as e:
+            log.warning(f"  Bybit funding {tag} cross-check failed: {e}")
+
+    # ── Tier 1a: Binance funding rate (BTC, ETH perp) ──
+    for sym, tag in SYMS:
+        try:
+            d = _http_get_json(f"{BINANCE}/fapi/v1/fundingRate?symbol={sym}&limit=60")
+            pts = [(int(x["fundingTime"]) / 1000, float(x["fundingRate"]) * 100) for x in d]
+            entry = _crypto_entry(
+                f"{tag} Funding Rate (perp)", "crypto_derivatives", pts, "percent",
+                "Binance Futures", f"https://www.binance.com/en/futures/funding-history",
+                cadence_days=0.33, as_of_ts=pts[-1][0], no_ytd=True)
+            if tag in bybit_funding:
+                div = (entry["value"] - bybit_funding[tag])
+                entry["cross_check"] = {
+                    "source": "Bybit", "value": round(bybit_funding[tag], 5),
+                    "divergence_bps": round(div * 100, 2),
+                }
+            results[f"{tag}_funding"] = entry
+            log.info(f"  Binance funding {tag:4s} → {entry['value']:+.4f}%  1D: {entry['change_1d']}")
+        except Exception as e:
+            log.error(f"  Binance funding {tag} failed: {e}")
+            results[f"{tag}_funding"] = {"label": f"{tag} Funding Rate (perp)",
+                                         "category": "crypto_derivatives", "error": str(e)}
+
+    # ── Tier 1b: Open Interest (BTC, ETH perp), USD notional, daily history ──
+    for sym, tag in SYMS:
+        try:
+            d = _http_get_json(f"{BINANCE}/futures/data/openInterestHist"
+                               f"?symbol={sym}&period=1d&limit=60")
+            pts = [(int(x["timestamp"]) / 1000, float(x["sumOpenInterestValue"])) for x in d]
+            entry = _crypto_entry(
+                f"{tag} Open Interest (USD)", "crypto_derivatives", pts, "price",
+                "Binance Futures", "https://www.binance.com/en/futures",
+                cadence_days=1, as_of_ts=pts[-1][0])
+            results[f"{tag}_oi"] = entry
+            log.info(f"  Binance OI {tag:4s} → ${entry['value']/1e9:.2f}B  1D: {entry['change_1d']}")
+        except Exception as e:
+            log.error(f"  Binance OI {tag} failed: {e}")
+            results[f"{tag}_oi"] = {"label": f"{tag} Open Interest (USD)",
+                                    "category": "crypto_derivatives", "error": str(e)}
+
+    # ── Tier 1c: Long/Short account ratio (BTC, ETH) ──
+    for sym, tag in SYMS:
+        try:
+            d = _http_get_json(f"{BINANCE}/futures/data/globalLongShortAccountRatio"
+                               f"?symbol={sym}&period=1d&limit=60")
+            pts = [(int(x["timestamp"]) / 1000, float(x["longShortRatio"])) for x in d]
+            entry = _crypto_entry(
+                f"{tag} Long/Short Ratio", "crypto_derivatives", pts, "ratio",
+                "Binance Futures", "https://www.binance.com/en/futures",
+                cadence_days=1, as_of_ts=pts[-1][0], no_ytd=True)
+            results[f"{tag}_ls_ratio"] = entry
+            log.info(f"  Binance L/S {tag:4s} → {entry['value']:.3f}  1D: {entry['change_1d']}")
+        except Exception as e:
+            log.error(f"  Binance L/S {tag} failed: {e}")
+            results[f"{tag}_ls_ratio"] = {"label": f"{tag} Long/Short Ratio",
+                                          "category": "crypto_derivatives", "error": str(e)}
+
+    # ── Tier 2a: Deribit DVOL implied-volatility index (BTC, ETH) ──
+    now_ms = int(datetime.now().timestamp() * 1000)
+    start_ms = now_ms - 60 * 24 * 3600 * 1000  # 60 days back
+    for cur in ("BTC", "ETH"):
+        try:
+            d = _http_get_json(f"https://www.deribit.com/api/v2/public/get_volatility_index_data"
+                               f"?currency={cur}&start_timestamp={start_ms}"
+                               f"&end_timestamp={now_ms}&resolution=43200")
+            rows = d.get("result", {}).get("data", [])
+            pts  = [(r[0] / 1000, float(r[4])) for r in rows]  # close
+            entry = _crypto_entry(
+                f"{cur} DVOL (implied vol)", "crypto_vol", pts, "index",
+                "Deribit", f"https://www.deribit.com/statistics/{cur}/volatility-index",
+                cadence_days=0.5, as_of_ts=pts[-1][0])
+            results[f"{cur}_dvol"] = entry
+            log.info(f"  Deribit DVOL {cur:4s} → {entry['value']:.1f}  1D: {entry['change_1d']}")
+        except Exception as e:
+            log.error(f"  Deribit DVOL {cur} failed: {e}")
+            results[f"{cur}_dvol"] = {"label": f"{cur} DVOL (implied vol)",
+                                      "category": "crypto_vol", "error": str(e)}
+
+    # ── Tier 2b: Stablecoin supply (total, USD) + history → liquidity proxy ──
+    try:
+        d = _http_get_json("https://stablecoins.llama.fi/stablecoincharts/all")
+        pts = []
+        for x in d[-60:]:
+            tot = x.get("totalCirculatingUSD") or x.get("totalCirculating") or {}
+            usd = tot.get("peggedUSD")
+            if usd is not None:
+                pts.append((int(x["date"]), float(usd)))
+        entry = _crypto_entry(
+            "Stablecoin Supply (total)", "crypto_liquidity", pts, "price",
+            "DeFiLlama", "https://defillama.com/stablecoins",
+            cadence_days=1, as_of_ts=pts[-1][0])
+        results["stablecoin_supply"] = entry
+        log.info(f"  DeFiLlama stablecoin supply → ${entry['value']/1e9:.1f}B  1W: {entry['change_1w']}")
+    except Exception as e:
+        log.error(f"  DeFiLlama stablecoin supply failed: {e}")
+        results["stablecoin_supply"] = {"label": "Stablecoin Supply (total)",
+                                        "category": "crypto_liquidity", "error": str(e)}
+
+    # ── Tier 2c: BTC dominance + ETH/BTC ratio (CoinGecko /global) ──
+    cg_headers = {"x-cg-demo-api-key": COINGECKO_API_KEY} if COINGECKO_API_KEY else None
+    try:
+        d   = _http_get_json("https://api.coingecko.com/api/v3/global", headers=cg_headers)
+        mcp = d.get("data", {}).get("market_cap_percentage", {})
+        btc_dom = mcp.get("btc")
+        if btc_dom is None:
+            raise ValueError("market_cap_percentage.btc missing")
+        results["btc_dominance"] = {
+            "label": "BTC Dominance", "category": "crypto_liquidity", "unit": "percent",
+            "value": round(float(btc_dom), 2), "as_of": TODAY,
+            "change_1d": "N/A", "change_1w": "N/A", "change_ytd": "N/A", "change_1y": "N/A",
+            "history": [],
+            "freshness": {"is_stale": False, "last_updated": TODAY},
+            "source": "CoinGecko" + ("" if COINGECKO_API_KEY else " (keyless)"),
+            "source_url": "https://www.coingecko.com/en/global-charts",
+        }
+        log.info(f"  CoinGecko BTC dominance → {btc_dom:.2f}%")
+    except Exception as e:
+        log.warning(f"  CoinGecko /global failed (Tier 2 degrades): {e}")
+        results["btc_dominance"] = {"label": "BTC Dominance", "category": "crypto_liquidity",
+                                    "error": str(e)}
+
+    try:
+        d = _http_get_json("https://api.coingecko.com/api/v3/simple/price"
+                           "?ids=ethereum&vs_currencies=btc", headers=cg_headers)
+        ethbtc = d.get("ethereum", {}).get("btc")
+        if ethbtc is not None:
+            results["eth_btc_ratio"] = {
+                "label": "ETH/BTC Ratio", "category": "crypto_liquidity", "unit": "ratio",
+                "value": round(float(ethbtc), 5), "as_of": TODAY,
+                "change_1d": "N/A", "change_1w": "N/A", "change_ytd": "N/A", "change_1y": "N/A",
+                "history": [],
+                "freshness": {"is_stale": False, "last_updated": TODAY},
+                "source": "CoinGecko", "source_url": "https://www.coingecko.com/en/coins/ethereum/btc",
+            }
+            log.info(f"  CoinGecko ETH/BTC → {ethbtc:.5f}")
+    except Exception as e:
+        log.warning(f"  CoinGecko ETH/BTC failed: {e}")
+
+    # ── Tier 3: Spot ETF net flow — explicit not-implemented stub ──
+    results["etf_net_flow"] = {
+        "label": "Spot ETF Net Flow", "category": "crypto_liquidity",
+        "status": "not_implemented",
+        "note": "No free public API available as of 2026-06; revisit Farside/SoSoValue if they ship one.",
+    }
+
+    return results
+
+# ─────────────────────────────────────────────────────────────────
 # 7. STATE MANAGER — Continuity between daily runs
 # ─────────────────────────────────────────────────────────────────
 
@@ -630,6 +882,15 @@ def save_state(output: dict) -> None:
                     "category": val.get("category"),
                 }
 
+        for key, val in output.get("crypto_data", {}).items():
+            if isinstance(val, dict) and "value" in val:
+                state["key_values"][key] = {
+                    "label":    val.get("label"),
+                    "value":    val.get("value"),
+                    "as_of":    val.get("as_of"),
+                    "category": val.get("category"),
+                }
+
         with open(state_file, "w", encoding="utf-8") as f:
             json.dump(state, f, indent=2, ensure_ascii=False, default=str)
         log.info(f"  State snapshot saved → {state_file}")
@@ -655,12 +916,16 @@ def validate_output(output: dict) -> dict:
     all_data = {
         **output.get("fred_data", {}),
         **output.get("market_data", {}),
+        **output.get("crypto_data", {}),
     }
 
     for key, val in all_data.items():
         if key.startswith("_"):
             continue
         if not isinstance(val, dict):
+            continue
+        # Explicit not-implemented stubs (e.g. ETF flow) are intentional — not a gap.
+        if val.get("status") == "not_implemented":
             continue
 
         label = val.get("label", key)
@@ -716,45 +981,50 @@ def main() -> dict:
     start_time = datetime.now()
 
     # ── Step 1: Load prior state ────────────────────────────────────
-    log.info("\n[Step 1/7] Loading prior state...")
+    log.info("\n[Step 1/8] Loading prior state...")
     prior_state = load_prior_state()
 
     # ── Step 2: Fetch FRED (US + intl macro) ───────────────────────
-    log.info("\n[Step 2/7] Fetching FRED macro data...")
+    log.info("\n[Step 2/8] Fetching FRED macro data...")
     fred_data = fetch_fred()
 
     # ── Step 3: Fetch market prices (yfinance) ─────────────────────
-    log.info("\n[Step 3/7] Fetching market prices (yfinance)...")
+    log.info("\n[Step 3/8] Fetching market prices (yfinance)...")
     market_data = fetch_yfinance()
 
-    # ── Step 4: Fetch World Bank (supplementary) ───────────────────
-    log.info("\n[Step 4/7] Fetching World Bank macro data...")
+    # ── Step 4: Fetch crypto-native quant data ─────────────────────
+    log.info("\n[Step 4/8] Fetching crypto derivatives / liquidity / vol...")
+    crypto_data = fetch_crypto_data()
+
+    # ── Step 5: Fetch World Bank (supplementary) ───────────────────
+    log.info("\n[Step 5/8] Fetching World Bank macro data...")
     world_bank_data = fetch_world_bank()
 
-    # ── Step 5: Fetch economic calendar ────────────────────────────
-    log.info("\n[Step 5/7] Fetching economic calendar (next 7 days)...")
+    # ── Step 6: Fetch economic calendar ────────────────────────────
+    log.info("\n[Step 6/8] Fetching economic calendar (next 7 days)...")
     calendar = fetch_economic_calendar()
 
-    # ── Step 6: Assemble output ────────────────────────────────────
-    log.info("\n[Step 6/7] Assembling output JSON...")
+    # ── Step 7: Assemble output ────────────────────────────────────
+    log.info("\n[Step 7/8] Assembling output JSON...")
     output = {
         "_meta": {
             "date":             TODAY,
             "generated_jst":    ts_now(),
             "timezone":         "Asia/Tokyo (JST, UTC+9)",
-            "script_version":   "1.1.0",
+            "script_version":   "1.2.0",
             "prior_state_date": prior_state.get("date", "none — first run"),
             "output_contract":  "v2",
         },
         "fred_data":        fred_data,
         "market_data":      market_data,
+        "crypto_data":      crypto_data,
         "world_bank_data":  world_bank_data,
         "calendar":         calendar,
         "prior_state":      prior_state.get("key_values", {}),
     }
 
-    # ── Step 7: Validate quality ────────────────────────────────────
-    log.info("\n[Step 7/7] Running data quality validation...")
+    # ── Step 8: Validate quality ────────────────────────────────────
+    log.info("\n[Step 8/8] Running data quality validation...")
     quality = validate_output(output)
     output["_quality"] = quality
 

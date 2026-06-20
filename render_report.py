@@ -54,6 +54,22 @@ ACCENT = ["#58a6ff","#f78166","#3fb950","#d2a8ff","#ffa657","#79c0ff"]
 POS    = "#3fb950"
 NEG    = "#f78166"
 
+# Dashboard rows (shared by the Markdown + PDF builders) — (section, key).
+DASH_ROWS = [
+    ("fred_data","DFF"), ("fred_data","DGS10"), ("fred_data","DGS2"),
+    ("fred_data","DFII10"),
+    ("fred_data","ECBDFR"), ("fred_data","IRSTCI01JPM156N"),
+    ("market_data","^GSPC"), ("market_data","^NDX"),
+    ("market_data","^N225"), ("market_data","^HSI"),
+    ("market_data","DX-Y.NYB"), ("market_data","USDJPY=X"), ("market_data","EURUSD=X"),
+    ("market_data","GC=F"), ("market_data","CL=F"),
+    ("market_data","BTC-USD"), ("market_data","ETH-USD"),
+    # ── Crypto-native (Chart 4 layer) ──
+    ("crypto_data","BTC_funding"), ("crypto_data","ETH_funding"),
+    ("crypto_data","BTC_oi"), ("crypto_data","ETH_oi"),
+    ("crypto_data","stablecoin_supply"), ("crypto_data","btc_dominance"),
+]
+
 # ─────────────────────────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────────────────────────
@@ -68,6 +84,22 @@ def fmt_val(v, decimals=2):
     if v is None: return "N/A"
     if abs(v) >= 1000: return f"{v:,.{decimals}f}"
     return f"{v:.{decimals}f}"
+
+def fmt_crypto_val(e):
+    """Dashboard-friendly value for a crypto entry: funding/dominance as %, OI &
+    stablecoin supply as $B, ratios as 2dp. Keeps the dashboard readable."""
+    v = e.get("value")
+    if v is None: return "N/A"
+    unit = e.get("unit", "")
+    try:
+        if unit == "percent":
+            return f"{v:+.4f}%" if abs(v) < 1 else f"{v:.2f}%"
+        if abs(v) >= 1e9:   return f"${v/1e9:.1f}B"
+        if abs(v) >= 1e6:   return f"${v/1e6:.1f}M"
+        if unit == "ratio": return f"{v:.2f}"
+        return fmt_val(v)
+    except Exception:
+        return fmt_val(v)
 
 def esc_amp(s):
     """Escape bare '&' for reportlab Paragraph (which parses HTML entities),
@@ -91,6 +123,17 @@ def get_history(entry):
     dates = [datetime.strptime(h["date"], "%Y-%m-%d") for h in hist]
     vals  = [h["value"] for h in hist]
     return dates, vals
+
+def get_history_daily(entry):
+    """Like get_history but collapses multiple intraday readings (e.g. funding
+    settles 3x/day, all stored at date granularity) to one point per day —
+    keeps the chart line clean instead of a sawtooth."""
+    dates, vals = get_history(entry)
+    by_day = {}
+    for d, v in zip(dates, vals):
+        by_day[d] = v  # last reading of the day wins
+    items = sorted(by_day.items())
+    return [d for d, _ in items], [v for _, v in items]
 
 def style_ax(ax, title="", ylabel=""):
     ax.set_facecolor(PANEL)
@@ -282,6 +325,55 @@ def chart_heatmap(data, today, footer):
     fig.savefig(path, dpi=140, facecolor=BG)
     plt.close(fig)
     return path, has_data
+
+
+# ─────────────────────────────────────────────────────────────────
+# CHART 4 — Crypto derivatives (funding + open interest)
+# ─────────────────────────────────────────────────────────────────
+def chart_crypto_derivatives(data, today, footer):
+    cd = data.get("crypto_data", {})
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6), facecolor=BG)
+    style_ax(ax1, "Crypto Perp Funding Rate — BTC & ETH", "Funding %/8h")
+    style_ax(ax2, "Crypto Open Interest — BTC & ETH", "OI ($B)")
+
+    f_plotted = 0
+    for i, (key, name) in enumerate([("BTC_funding", "BTC"), ("ETH_funding", "ETH")]):
+        dates, vals = get_history_daily(cd.get(key, {}))
+        if len(vals) >= 2:
+            ax1.plot(dates, vals, color=ACCENT[i], lw=1.6, label=name, zorder=3)
+            ax1.annotate(f"{vals[-1]:+.3f}%", xy=(dates[-1], vals[-1]), color=ACCENT[i],
+                         fontsize=7, va="center", xytext=(6, 0), textcoords="offset points")
+            f_plotted += 1
+    ax1.axhline(0, color=TEXT, lw=0.6, ls="--", alpha=0.35, zorder=1)
+    if f_plotted:
+        ax1.legend(facecolor=PANEL, edgecolor=GRID, labelcolor=TEXT, fontsize=8,
+                   framealpha=0.9, loc="upper left")
+
+    oi_plotted = 0
+    for i, (key, name) in enumerate([("BTC_oi", "BTC"), ("ETH_oi", "ETH")]):
+        dates, vals = get_history(cd.get(key, {}))
+        if len(vals) >= 2:
+            vb = [v / 1e9 for v in vals]
+            ax2.plot(dates, vb, color=ACCENT[i], lw=1.6, label=name, zorder=3)
+            ax2.annotate(f"${vb[-1]:.1f}B", xy=(dates[-1], vb[-1]), color=ACCENT[i],
+                         fontsize=7, va="center", xytext=(6, 0), textcoords="offset points")
+            oi_plotted += 1
+    if oi_plotted:
+        ax2.legend(facecolor=PANEL, edgecolor=GRID, labelcolor=TEXT, fontsize=8,
+                   framealpha=0.9, loc="upper left")
+
+    ok = (f_plotted > 0) or (oi_plotted > 0)
+    if not ok:
+        ax1.text(0.5, 0.5, "No crypto derivatives history.\nRe-run fetch_data.py.",
+                 ha="center", va="center", color=SUB, fontsize=10, transform=ax1.transAxes)
+
+    fig.text(0.99, 0.01, footer, ha="right", color=SUB, fontsize=6)
+    fig.patch.set_facecolor(BG)
+    path = CHARTS_DIR / f"chart-4_crypto_{today}.png"
+    fig.tight_layout(pad=1.2)
+    fig.savefig(path, dpi=140, facecolor=BG)
+    plt.close(fig)
+    return path, ok
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -741,6 +833,114 @@ def chart_analysis_heatmap(data, fname):
     lines.append("")
     return "\n".join(lines)
 
+
+def _crypto_val(data, key):
+    """Return a crypto_data value, or None if missing/errored."""
+    e = data.get("crypto_data", {}).get(key, {})
+    return e.get("value") if isinstance(e, dict) and "error" not in e and "value" in e else None
+
+
+def crypto_narrative(data):
+    """'Crypto Market Structure' subsection — derivatives positioning + liquidity."""
+    cd = data.get("crypto_data", {})
+    btc_fund  = _crypto_val(data, "BTC_funding")
+    eth_fund  = _crypto_val(data, "ETH_funding")
+    btc_oi    = _crypto_val(data, "BTC_oi")
+    eth_oi    = _crypto_val(data, "ETH_oi")
+    btc_ls    = _crypto_val(data, "BTC_ls_ratio")
+    stable    = _crypto_val(data, "stablecoin_supply")
+    dom       = _crypto_val(data, "btc_dominance")
+    dvol_btc  = _crypto_val(data, "BTC_dvol")
+    stable_1w = parse_pct(cd.get("stablecoin_supply", {}).get("change_1w"))
+    btc_oi_1d = parse_pct(cd.get("BTC_oi", {}).get("change_1d"))
+
+    if btc_fund is None and stable is None and btc_oi is None:
+        return "*Crypto-native data unavailable this run — see Section 6 for quality flags.*"
+
+    parts = []
+
+    if btc_fund is not None:
+        if   btc_fund > 0.05: tone = f"**long-crowded** ({btc_fund:+.3f}%/8h) — leverage skewed long; squeeze risk if price stalls"
+        elif btc_fund < 0:    tone = f"**short-crowded** ({btc_fund:+.3f}%/8h) — shorts pay longs; potential short-squeeze fuel"
+        else:                 tone = f"neutral-to-mild ({btc_fund:+.3f}%/8h) — no extreme positioning"
+        p = f"**Perp funding:** BTC is {tone}"
+        if eth_fund is not None: p += f"; ETH at {eth_fund:+.3f}%/8h"
+        cc = cd.get("BTC_funding", {}).get("cross_check")
+        if cc: p += f" (Bybit cross-check Δ {cc.get('divergence_bps', 0):+.2f} bps — sources agree)"
+        parts.append(p + ".")
+
+    if btc_oi is not None:
+        t = f"**Open interest:** BTC ${btc_oi/1e9:.1f}B"
+        if eth_oi is not None: t += f", ETH ${eth_oi/1e9:.1f}B"
+        if btc_oi_1d is not None:
+            if   btc_oi_1d > 2 and btc_fund and btc_fund > 0: t += f" — rising ({btc_oi_1d:+.1f}% 1D) with positive funding = fresh long leverage building"
+            elif btc_oi_1d < -3:                              t += f" — falling ({btc_oi_1d:+.1f}% 1D) = de-leveraging / position unwind"
+            else:                                             t += f" ({btc_oi_1d:+.1f}% 1D)"
+        parts.append(t + ".")
+
+    if stable is not None:
+        if   stable_1w is not None and stable_1w > 0.3:  liq = f"**rising** ({stable_1w:+.2f}% WoW) — fresh liquidity entering, supportive for risk-on continuation"
+        elif stable_1w is not None and stable_1w < -0.3: liq = f"**contracting** ({stable_1w:+.2f}% WoW) — liquidity leaving, caution on breakout follow-through"
+        elif stable_1w is not None:                      liq = f"roughly flat ({stable_1w:+.2f}% WoW)"
+        else:                                            liq = "stable"
+        parts.append(f"**Stablecoin liquidity:** total supply ${stable/1e9:.0f}B, {liq}.")
+
+    ctx = []
+    if dom is not None:      ctx.append(f"BTC dominance {dom:.1f}%")
+    if dvol_btc is not None: ctx.append(f"BTC implied vol (DVOL) {dvol_btc:.0f}")
+    if btc_ls is not None:   ctx.append(f"BTC long/short ratio {btc_ls:.2f}")
+    if ctx: parts.append("**Context:** " + ", ".join(ctx) + ".")
+
+    return "\n\n".join(parts)
+
+
+def chart_analysis_crypto(data, fname):
+    btc_fund  = _crypto_val(data, "BTC_funding")
+    eth_fund  = _crypto_val(data, "ETH_funding")
+    btc_oi    = _crypto_val(data, "BTC_oi")
+    eth_oi    = _crypto_val(data, "ETH_oi")
+    btc_ls    = _crypto_val(data, "BTC_ls_ratio")
+    eth_ls    = _crypto_val(data, "ETH_ls_ratio")
+    btc_oi_1d = parse_pct(data.get("crypto_data", {}).get("BTC_oi", {}).get("change_1d"))
+
+    lines = ["### 📊 Chart 4: Crypto Derivatives — Funding & Open Interest\n",
+             f"![Chart 4]({fname})\n",
+             "**What this chart shows:**  ",
+             "Top panel: **perp funding rate** (BTC & ETH) — the recurring payment between "
+             "longs and shorts. Positive = longs pay shorts (bullish-crowded); negative = shorts "
+             "pay longs (bearish-crowded). Bottom panel: **open interest** — total notional in open "
+             "perp positions; rising OI = new leverage entering, falling OI = positions closing. "
+             "Read together: rising price + rising OI + positive funding = leverage-driven, "
+             "squeeze-prone rally; rising price + falling OI = spot-led and healthier.\n",
+             "**Key Observations:**"]
+
+    if btc_fund is not None:
+        crowd = "long-crowded (squeeze risk)" if btc_fund > 0.05 else "short-crowded (squeeze fuel)" if btc_fund < 0 else "balanced positioning"
+        line = f"- **BTC funding:** {btc_fund:+.3f}%/8h — {crowd}"
+        if eth_fund is not None: line += f"; ETH {eth_fund:+.3f}%/8h"
+        lines.append(line)
+    if btc_oi is not None:
+        t = f"- **Open interest:** BTC ${btc_oi/1e9:.1f}B"
+        if eth_oi is not None: t += f", ETH ${eth_oi/1e9:.1f}B"
+        if btc_oi_1d is not None: t += f" (BTC {btc_oi_1d:+.1f}% 1D)"
+        lines.append(t)
+    if btc_ls is not None:
+        t = f"- **Long/Short account ratio:** BTC {btc_ls:.2f}"
+        if eth_ls is not None: t += f", ETH {eth_ls:.2f}"
+        lines.append(t + " — >1 = more accounts net-long (retail positioning skew)")
+    if btc_fund is None and btc_oi is None:
+        lines.append("- Crypto derivatives data unavailable — see Section 6 for flags.")
+
+    if   btc_fund is not None and btc_fund > 0.05 and btc_oi_1d is not None and btc_oi_1d > 2:
+        watch = "Funding elevated AND OI rising — crowded longs on fresh leverage; a stall in price can trigger a long squeeze / liquidation cascade."
+    elif btc_fund is not None and btc_fund < 0:
+        watch = "Funding negative — shorts crowded; a squeeze higher forces short-covering and can accelerate quickly."
+    else:
+        watch = "Watch for funding flipping sign or OI spiking while price stalls — both often precede liquidation cascades."
+    lines += ["", f"**⚡ Watch for:** {watch}", ""]
+    return "\n".join(lines)
+
+
 # ─────────────────────────────────────────────────────────────────
 # MARKDOWN BUILDER
 # ─────────────────────────────────────────────────────────────────
@@ -762,33 +962,28 @@ def build_markdown(data, today, chart_paths):
               "| Indicator | Value | 1D | YTD | As Of | Source |",
               "|---|---|---|---|---|---|"]
 
-    DASH = [("fred_data","DFF"), ("fred_data","DGS10"), ("fred_data","DGS2"),
-            ("fred_data","ECBDFR"), ("fred_data","IRSTCI01JPM156N"),
-            ("market_data","^GSPC"), ("market_data","^NDX"),
-            ("market_data","^N225"), ("market_data","^HSI"),
-            ("market_data","DX-Y.NYB"), ("market_data","USDJPY=X"), ("market_data","EURUSD=X"),
-            ("market_data","GC=F"), ("market_data","CL=F"),
-            ("market_data","BTC-USD"), ("market_data","ETH-USD")]
-
-    for section, key in DASH:
+    for section, key in DASH_ROWS:
         e = data.get(section,{}).get(key,{})
         if not e or "value" not in e or e.get("value") is None: continue
-        v   = e["value"]
-        src = "FRED" if section == "fred_data" else "Yahoo Finance"
-        sf  = stale_flag(e)
-        lines.append(f"| {e.get('label',key)}{sf} | {fmt_val(v)} | "
+        src  = {"fred_data":"FRED","crypto_data":"Crypto"}.get(section, "Yahoo Finance")
+        disp = fmt_crypto_val(e) if section == "crypto_data" else fmt_val(e["value"])
+        sf   = stale_flag(e)
+        lines.append(f"| {e.get('label',key)}{sf} | {disp} | "
                      f"{e.get('change_1d','N/A')} | {e.get('change_ytd','N/A')} | "
                      f"{e.get('as_of','N/A')} | {src} |")
     lines.append("\n*⚠ = value older than freshness threshold. All changes are from prior reading.*\n")
 
     lines += ["---\n\n## 3. Market Narrative\n",
               f"### Risk Regime: {auto_regime(data)}\n",
-              auto_narrative(data), ""]
+              auto_narrative(data), "",
+              "### Crypto Market Structure\n",
+              crypto_narrative(data), ""]
 
     lines += ["---\n\n## 4. Chart Analysis\n",
               chart_analysis_equity(data, chart_paths[0].name),
               chart_analysis_rates(data, chart_paths[1].name),
-              chart_analysis_heatmap(data, chart_paths[2].name)]
+              chart_analysis_heatmap(data, chart_paths[2].name),
+              chart_analysis_crypto(data, chart_paths[3].name)]
 
     lines += ["---\n\n## 5. Forward Calendar (Next 14 Days)\n"]
     raw_cal = data.get("calendar", [])
@@ -900,22 +1095,14 @@ def build_pdf(data, today, md_text, chart_paths):
 
     # Section 2 — Dashboard
     elems.append(Paragraph("2. Key Indicators Dashboard", sH2))
-    DASH = [("fred_data","DFF"), ("fred_data","DGS10"), ("fred_data","DGS2"),
-            ("fred_data","ECBDFR"), ("fred_data","IRSTCI01JPM156N"),
-            ("market_data","^GSPC"), ("market_data","^NDX"),
-            ("market_data","^N225"), ("market_data","^HSI"),
-            ("market_data","DX-Y.NYB"), ("market_data","USDJPY=X"), ("market_data","EURUSD=X"),
-            ("market_data","GC=F"), ("market_data","CL=F"),
-            ("market_data","BTC-USD"), ("market_data","ETH-USD")]
-
     rows = [["Indicator","Value","1D Change","YTD Change","As Of"]]
-    for section, key in DASH:
+    for section, key in DASH_ROWS:
         e = data.get(section,{}).get(key,{})
         if not e or "value" not in e or e.get("value") is None: continue
-        v   = e["value"]
-        sf  = " ⚠" if e.get("freshness",{}).get("is_stale") else ""
+        sf   = " ⚠" if e.get("freshness",{}).get("is_stale") else ""
+        disp = fmt_crypto_val(e) if section == "crypto_data" else fmt_val(e["value"])
         rows.append([f"{e.get('label',key)}{sf}",
-                     fmt_val(v),
+                     disp,
                      str(e.get("change_1d","N/A"))[:14],
                      str(e.get("change_ytd","N/A"))[:14],
                      e.get("as_of","N/A")])
@@ -946,18 +1133,23 @@ def build_pdf(data, today, md_text, chart_paths):
     elems.append(Paragraph("3. Market Narrative", sH2))
     elems.append(Paragraph(f"<b>Risk Regime: {auto_regime(data)}</b>", sBOD))
     for para in auto_narrative(data).split("\n\n"):
-        clean = esc_amp(para).replace("**","<b>",1).replace("**","</b>",1)
-        clean = clean.replace("*","<i>",1).replace("*","</i>",1) if "*" in clean else clean
-        elems.append(Paragraph(clean, sBOD))
+        if para.strip():
+            elems.append(Paragraph(md_inline(para), sBOD))
+    elems.append(Paragraph("<b>Crypto Market Structure</b>", sBOD))
+    for para in crypto_narrative(data).split("\n\n"):
+        if para.strip():
+            elems.append(Paragraph(md_inline(para), sBOD))
 
     # Section 4 — Charts + per-chart analysis (key points)
     elems.append(Paragraph("4. Chart Analysis", sH2))
     chart_titles = ["Chart 1: Major Equity Indices — 30-day normalized",
                     "Chart 2: US Rates & Yields — 30-day trend",
-                    "Chart 3: Cross-Asset Performance Heatmap"]
+                    "Chart 3: Cross-Asset Performance Heatmap",
+                    "Chart 4: Crypto Derivatives — Funding & Open Interest"]
     analyses = [chart_analysis_equity(data,  chart_paths[0].name),
                 chart_analysis_rates(data,   chart_paths[1].name),
-                chart_analysis_heatmap(data, chart_paths[2].name)]
+                chart_analysis_heatmap(data, chart_paths[2].name),
+                chart_analysis_crypto(data,  chart_paths[3].name)]
     # Fit each chart into a bounding box while preserving its native aspect
     # ratio, so square-ish charts (e.g. the heatmap) are not stretched flat.
     max_w, max_h = 16.5*cm, 9.5*cm
@@ -1067,8 +1259,10 @@ def main():
     print(f"  Chart 2 (rates)    {'✓ with trend data' if ok2 else '⚠ no history or FRED key missing'}")
     c3, ok3 = chart_heatmap(data, today, footer)
     print(f"  Chart 3 (heatmap)  {'✓ with change data' if ok3 else '⚠ 1D changes N/A (live fetch failed)'}")
+    c4, ok4 = chart_crypto_derivatives(data, today, footer)
+    print(f"  Chart 4 (crypto)   {'✓ with derivatives data' if ok4 else '⚠ no crypto history (fetch failed)'}")
 
-    chart_paths = [c1, c2, c3]
+    chart_paths = [c1, c2, c3, c4]
 
     md = build_markdown(data, today, chart_paths)
     md_path = REPORTS_DIR / f"econ-insight_{today}.md"
