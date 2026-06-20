@@ -1,5 +1,5 @@
 # Daily Economic Intelligence Report
-**Date:** 2026-06-20 | **Generated:** 2026-06-20 17:43:06 JST | **Confidence:** High
+**Date:** 2026-06-20 | **Generated:** 2026-06-20 18:43:01 JST | **Confidence:** High
 
 ---
 
@@ -30,14 +30,19 @@
 | EUR/USD | 1.15 | -0.33% | -2.39% | 2026-06-19 | Yahoo Finance |
 | Gold | 4,172.90 | -1.21% | -3.28% | 2026-06-19 | Yahoo Finance |
 | WTI Crude | 76.54 | -0.08% | +33.53% | 2026-06-19 | Yahoo Finance |
-| Bitcoin | 63,405.99 | -0.21% | -28.54% | 2026-06-20 | Yahoo Finance |
-| Ethereum | 1,722.44 | +0.67% | -42.59% | 2026-06-20 | Yahoo Finance |
+| Bitcoin | 63,644.23 | +0.16% | -28.27% | 2026-06-20 | Yahoo Finance |
+| Ethereum | 1,727.28 | +0.95% | -42.43% | 2026-06-20 | Yahoo Finance |
 | BTC Funding Rate (perp) | +0.0026% | -0.3 bps | N/A | 2026-06-20 | Crypto |
 | ETH Funding Rate (perp) | +0.0032% | +0.1 bps | N/A | 2026-06-20 | Crypto |
-| BTC Open Interest (USD) | $6.2B | -0.03% | -21.23% | 2026-06-20 | Crypto |
-| ETH Open Interest (USD) | $3.8B | -1.59% | -19.28% | 2026-06-20 | Crypto |
-| Stablecoin Supply (total) | $313.4B | +0.04% | -1.87% | 2026-06-20 | Crypto |
-| BTC Dominance | 56.05% | N/A | N/A | 2026-06-20 | Crypto |
+| BTC Open Interest (USD) | $6.2B | -0.03% | -21.23% (30D) | 2026-06-20 | Crypto |
+| ETH Open Interest (USD) | $3.8B | -1.59% | -19.28% (30D) | 2026-06-20 | Crypto |
+| BTC Long/Short Ratio | 1.91 | -1.41% | N/A | 2026-06-20 | Crypto |
+| ETH Long/Short Ratio | 2.11 | -3.85% | N/A | 2026-06-20 | Crypto |
+| BTC DVOL (implied vol) | 40.4 | -0.30% | N/A | 2026-06-20 | Crypto |
+| ETH DVOL (implied vol) | 56.8 | -0.65% | N/A | 2026-06-20 | Crypto |
+| Stablecoin Supply (total) | $313.5B | +0.05% | N/A | 2026-06-20 | Crypto |
+| BTC Dominance | 56.08% | N/A | N/A | 2026-06-20 | Crypto |
+| ETH/BTC Ratio | 0.02716 | N/A | N/A | 2026-06-20 | Crypto |
 
 *⚠ = value older than freshness threshold. All changes are from prior reading.*
 
@@ -51,7 +56,7 @@
 
 The Fed Funds rate stands at 3.63%, with the 10Y Treasury yield at 4.49% and the 2Y at 4.20%. The 10Y–2Y spread is +29 bps (mildly positive — limited inversion risk near-term). The ECB deposit rate is 2.25%.
 
-DXY Dollar Index at 100.85. USD/JPY at 161.27 (JPY weak vs dollar). Gold at $4,173/oz. WTI Crude at $76.54/bbl. Bitcoin at $63,406 (-0.21% on session).
+DXY Dollar Index at 100.85. USD/JPY at 161.27 (JPY weak vs dollar). Gold at $4,173/oz. WTI Crude at $76.54/bbl. Bitcoin at $63,644 (+0.16% on session).
 
 ### Crypto Market Structure
 
@@ -59,9 +64,11 @@ DXY Dollar Index at 100.85. USD/JPY at 161.27 (JPY weak vs dollar). Gold at $4,1
 
 **Open interest:** BTC $6.2B, ETH $3.8B (-0.0% 1D).
 
-**Stablecoin liquidity:** total supply $313B, roughly flat (+0.09% WoW).
+**Stablecoin liquidity:** total supply $313B, roughly flat (+0.10% WoW).
 
-**Context:** BTC dominance 56.0%, BTC implied vol (DVOL) 41, BTC long/short ratio 1.91.
+**Context:** BTC dominance 56.1%, BTC implied vol (DVOL) 40 — normal, BTC long/short ratio 1.91.
+
+**⚡ Watch for:** no extreme in funding, leverage, or liquidity — monitor for funding flipping sign or stablecoin supply turning, which usually leads the next directional move.
 
 ---
 
@@ -106,14 +113,14 @@ Three lines map the US interest rate curve: the **Fed Funds Rate** (overnight po
 Each **row** is an asset; each **column** is a timeframe (1D = today, 1W = rolling 7 days, YTD = year-to-date). **Green = gain, Red = loss** — darker color means larger magnitude. Reading *across a row*: is today's move consistent with the longer trend? Reading *down a column*: which assets lead or lag on that timeframe? Assets are grouped: Equities → FX → Commodities → Crypto.
 
 **Key Observations:**
-- **1D session tone:** 4 assets green vs 7 red (broadly Risk-Off)
+- **1D session tone:** 8 assets green vs 6 red (mixed / transitional)
 - **Best YTD:** Nikkei 225 at +37.5% — momentum intact (also green 1D)
-- **Worst YTD:** Ethereum at -42.6% — underperforming on the year; check if 1D is also red (trend continuing) or green (potential stabilization)
+- **Worst YTD:** Ethereum at -42.4% — underperforming on the year; check if 1D is also red (trend continuing) or green (potential stabilization)
 - **Risk signal:** S&P 500 up (+1.08%) while Gold down (-1.21%) — classic clean risk-on; capital rotating from safe haven to equities
 - **USD/JPY at 161.27:** Yen is weak vs dollar — JPY carry trades active. A sudden JPY strengthening (USD/JPY falling rapidly) can cause forced carry-unwind and sharp cross-asset selloff
-- **Crypto correlation:** BTC (-0.21%) vs S&P 500 (+1.08%) — diverging from equities — crypto-specific catalysts may be at play
+- **Crypto correlation:** BTC (+0.16%) vs S&P 500 (+1.08%) — diverging from equities — crypto-specific catalysts may be at play
 
-**⚡ Watch for:** Ethereum is down -42.6% YTD — if it starts showing consistent 1D green sessions, that is a potential mean-reversion trade setup.
+**⚡ Watch for:** Ethereum is down -42.4% YTD — if it starts showing consistent 1D green sessions, that is a potential mean-reversion trade setup.
 
 ### 📊 Chart 4: Crypto Derivatives — Funding & Open Interest
 
@@ -124,10 +131,23 @@ Top panel: **perp funding rate** (BTC & ETH) — the recurring payment between l
 
 **Key Observations:**
 - **BTC funding:** +0.003%/8h — balanced positioning; ETH +0.003%/8h
-- **Open interest:** BTC $6.2B, ETH $3.8B (BTC -0.0% 1D)
+- **Open interest:** BTC $6.2B, ETH $3.8B (BTC -0.0% 1D, -21.23% 30D)
 - **Long/Short account ratio:** BTC 1.91, ETH 2.11 — >1 = more accounts net-long (retail positioning skew)
 
 **⚡ Watch for:** Watch for funding flipping sign or OI spiking while price stalls — both often precede liquidation cascades.
+
+### 📊 Chart 5: Crypto Liquidity & Volatility
+
+![Chart 5](chart-5_crypto_liq_2026-06-20.png)
+
+**What this chart shows:**  
+Top panel: **total stablecoin supply** — the dry-powder liquidity sitting on exchanges and in wallets, ready to rotate into risk assets. Its *direction* matters more than its level: rising supply = fresh capital entering the system (a tailwind for risk-on continuation); falling supply = capital leaving (a headwind that makes breakouts prone to failure). Bottom panel: **DVOL** — Deribit's crypto implied-volatility index, the crypto-native analogue of the equity VIX. Low DVOL = calm/complacency (often precedes a volatility expansion); high DVOL = stress/fear (often near capitulation). Dashed lines mark the compressed (40) and elevated (60) regime thresholds.
+
+**Key Observations:**
+- **Stablecoin supply:** $313B, roughly flat (+0.10% WoW) — liquidity steady
+- **DVOL (implied vol):** BTC 40 — normal; ETH 57 (BTC -0.3% 1D)
+
+**⚡ Watch for:** Track stablecoin direction (liquidity) against DVOL (vol regime) — a turn in either typically leads the next sustained move.
 
 ---
 
@@ -151,10 +171,10 @@ All data sources clean — no flags raised.
 
 ## 7. Key Takeaways — What Matters Today
 
-- **Risk regime is Risk-On.** 7 of 14 tracked assets closed higher; S&P 500 +1.08% on the session.
+- **Risk regime is Risk-On.** 8 of 14 tracked assets closed higher; S&P 500 +1.08% on the session.
 - **Biggest 1D movers:** NASDAQ 100 +2.48% led gains; Hang Seng -1.59% led declines.
 - **Rates:** Fed Funds at 3.63%, 10Y 4.49% / 2Y 4.20% — 10Y–2Y spread +29 bps, modestly positive (normal).
-- **Year-to-date:** Nikkei 225 leads at +37.5%, while Ethereum lags at -42.6%.
+- **Year-to-date:** Nikkei 225 leads at +37.5%, while Ethereum lags at -42.4%.
 - **Cross-asset signal:** equities up while gold fell — clean risk-on rotation out of safe havens.
 - **Next catalyst:** Personal Income & Outlays (PCE inflation) on 2026-06-25, plus 2 more high-impact release(s) within the horizon — expect volatility around the print.
 

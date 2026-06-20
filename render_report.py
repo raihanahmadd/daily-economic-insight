@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-render_report.py v2.0
+render_report.py v2.1
 ═══════════════════════════════════════════════════════════════════
 Economic Intelligence System — Layer 3: Presentation
 ═══════════════════════════════════════════════════════════════════
@@ -64,10 +64,13 @@ DASH_ROWS = [
     ("market_data","DX-Y.NYB"), ("market_data","USDJPY=X"), ("market_data","EURUSD=X"),
     ("market_data","GC=F"), ("market_data","CL=F"),
     ("market_data","BTC-USD"), ("market_data","ETH-USD"),
-    # ── Crypto-native (Chart 4 layer) ──
+    # ── Crypto-native (Chart 4 + 5 layers) ──
     ("crypto_data","BTC_funding"), ("crypto_data","ETH_funding"),
     ("crypto_data","BTC_oi"), ("crypto_data","ETH_oi"),
-    ("crypto_data","stablecoin_supply"), ("crypto_data","btc_dominance"),
+    ("crypto_data","BTC_ls_ratio"), ("crypto_data","ETH_ls_ratio"),
+    ("crypto_data","BTC_dvol"), ("crypto_data","ETH_dvol"),
+    ("crypto_data","stablecoin_supply"),
+    ("crypto_data","btc_dominance"), ("crypto_data","eth_btc_ratio"),
 ]
 
 # ─────────────────────────────────────────────────────────────────
@@ -96,10 +99,20 @@ def fmt_crypto_val(e):
             return f"{v:+.4f}%" if abs(v) < 1 else f"{v:.2f}%"
         if abs(v) >= 1e9:   return f"${v/1e9:.1f}B"
         if abs(v) >= 1e6:   return f"${v/1e6:.1f}M"
-        if unit == "ratio": return f"{v:.2f}"
+        if unit == "ratio": return f"{v:.5f}" if abs(v) < 0.1 else f"{v:.2f}"
+        if unit == "index": return f"{v:.1f}"
         return fmt_val(v)
     except Exception:
         return fmt_val(v)
+
+def fmt_longterm(e):
+    """Longer-term change for the dashboard's 'YTD' column: entries whose source caps
+    history below a year carry an honest `change_30d` (e.g. OI) → show that labelled
+    '(30D)' instead of a misleading YTD; everything else shows its real YTD change."""
+    d30 = e.get("change_30d")
+    if d30 and d30 != "N/A":
+        return f"{d30} (30D)"
+    return e.get("change_ytd", "N/A")
 
 def esc_amp(s):
     """Escape bare '&' for reportlab Paragraph (which parses HTML entities),
@@ -377,6 +390,55 @@ def chart_crypto_derivatives(data, today, footer):
 
 
 # ─────────────────────────────────────────────────────────────────
+# CHART 5 — Crypto liquidity (stablecoin supply) & volatility (DVOL)
+# ─────────────────────────────────────────────────────────────────
+def chart_crypto_liquidity(data, today, footer):
+    cd = data.get("crypto_data", {})
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6), facecolor=BG)
+    style_ax(ax1, "Stablecoin Total Supply — Dry-Powder Liquidity", "Supply ($B)")
+    style_ax(ax2, "Crypto Implied Volatility (DVOL) — BTC & ETH", "DVOL")
+
+    s_plotted = 0
+    dates, vals = get_history_daily(cd.get("stablecoin_supply", {}))
+    if len(vals) >= 2:
+        vb = [v / 1e9 for v in vals]
+        ax1.plot(dates, vb, color=ACCENT[2], lw=1.8, label="Stablecoin supply", zorder=3)
+        ax1.annotate(f"${vb[-1]:.0f}B", xy=(dates[-1], vb[-1]), color=ACCENT[2],
+                     fontsize=7, va="center", xytext=(6, 0), textcoords="offset points")
+        ax1.legend(facecolor=PANEL, edgecolor=GRID, labelcolor=TEXT, fontsize=8,
+                   framealpha=0.9, loc="upper left")
+        s_plotted = 1
+
+    v_plotted = 0
+    for i, (key, name) in enumerate([("BTC_dvol", "BTC"), ("ETH_dvol", "ETH")]):
+        dates, vals = get_history_daily(cd.get(key, {}))
+        if len(vals) >= 2:
+            ax2.plot(dates, vals, color=ACCENT[i], lw=1.6, label=name, zorder=3)
+            ax2.annotate(f"{vals[-1]:.0f}", xy=(dates[-1], vals[-1]), color=ACCENT[i],
+                         fontsize=7, va="center", xytext=(6, 0), textcoords="offset points")
+            v_plotted += 1
+    # DVOL regime reference bands (compressed <40, elevated >60)
+    if v_plotted:
+        ax2.axhline(40, color=POS, lw=0.6, ls="--", alpha=0.3, zorder=1)
+        ax2.axhline(60, color=NEG, lw=0.6, ls="--", alpha=0.3, zorder=1)
+        ax2.legend(facecolor=PANEL, edgecolor=GRID, labelcolor=TEXT, fontsize=8,
+                   framealpha=0.9, loc="upper left")
+
+    ok = (s_plotted > 0) or (v_plotted > 0)
+    if not ok:
+        ax1.text(0.5, 0.5, "No crypto liquidity/vol history.\nRe-run fetch_data.py.",
+                 ha="center", va="center", color=SUB, fontsize=10, transform=ax1.transAxes)
+
+    fig.text(0.99, 0.01, footer, ha="right", color=SUB, fontsize=6)
+    fig.patch.set_facecolor(BG)
+    path = CHARTS_DIR / f"chart-5_crypto_liq_{today}.png"
+    fig.tight_layout(pad=1.2)
+    fig.savefig(path, dpi=140, facecolor=BG)
+    plt.close(fig)
+    return path, ok
+
+
+# ─────────────────────────────────────────────────────────────────
 # AUTO NARRATIVE — Data-driven, no LLM needed
 # ─────────────────────────────────────────────────────────────────
 def auto_narrative(data):
@@ -517,14 +579,36 @@ def auto_summary(data):
 
 
 # ─────────────────────────────────────────────────────────────────
-# RISK REGIME
+# RISK REGIME + BREADTH (single source of truth)
 # ─────────────────────────────────────────────────────────────────
+def _breadth(data):
+    """Green vs red count across ALL market_data 1D moves — the ONE breadth source
+    of truth shared by auto_regime, auto_conclusion, and the heatmap analysis, so
+    those three can never contradict each other again. Returns (green, red, na)."""
+    green = red = na = 0
+    for tk, e in data.get("market_data", {}).items():
+        if not isinstance(e, dict) or "label" not in e:
+            continue
+        p = parse_pct(e.get("change_1d"))
+        if   p is None: na += 1
+        elif p > 0:     green += 1
+        else:           red += 1
+    return green, red, na
+
+
 def auto_regime(data):
+    """Combine S&P direction with market breadth so Section 3 cannot contradict the
+    heatmap's breadth read. Risk-On needs S&P up AND net-green breadth; Risk-Off on
+    S&P down OR strongly-red breadth; otherwise Transitional / Mixed."""
     spx = parse_pct(data.get("market_data",{}).get("^GSPC",{}).get("change_1d"))
-    if spx is None: return "Undetermined (no live data)"
-    if spx >  0.3: return "Risk-On"
-    if spx < -0.3: return "Risk-Off"
-    return "Transitional"
+    green, red, _ = _breadth(data)
+    if spx is None and green == 0 and red == 0:
+        return "Undetermined (no live data)"
+    if spx is not None and spx > 0.3 and green > red:
+        return "Risk-On"
+    if (spx is not None and spx < -0.3) or red > green * 1.5:
+        return "Risk-Off"
+    return "Transitional / Mixed"
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -552,12 +636,11 @@ def auto_conclusion(data):
     spx_1d  = parse_pct(mkt.get("^GSPC", {}).get("change_1d"))
     gold_1d = parse_pct(mkt.get("GC=F",  {}).get("change_1d"))
 
-    # 1. Risk regime + market breadth
-    if moves_1d:
-        green = sum(1 for _, v in moves_1d if v > 0)
-        total = len(moves_1d)
+    # 1. Risk regime + market breadth (shared _breadth helper — see auto_regime)
+    green, red, _ = _breadth(data)
+    if green + red > 0:
         regime = auto_regime(data)
-        breadth = f"{green} of {total} tracked assets closed higher"
+        breadth = f"{green} of {green + red} tracked assets closed higher"
         tail = f"; S&P 500 {spx_1d:+.2f}% on the session." if spx_1d is not None else "."
         points.append(f"**Risk regime is {regime}.** {breadth}{tail}")
 
@@ -736,27 +819,16 @@ def chart_analysis_heatmap(data, fname):
         "Crypto":     ["BTC-USD","ETH-USD"],
     }
     all_ytd, ytd_named = [], []
-    green_1d, red_1d, na_1d = 0, 0, 0
-
     for group, tickers in GROUPS.items():
         for tk in tickers:
             e = mkt.get(tk, {})
             if not e: continue
-            p1d  = parse_pct(e.get("change_1d"))
             pytd = parse_pct(e.get("change_ytd"))
-            if p1d  is not None: (green_1d if p1d > 0 else red_1d).__iadd__ if False else (green_1d := green_1d+1 if p1d > 0 else green_1d, red_1d := red_1d+1 if p1d <= 0 else red_1d)
-            else: na_1d += 1
             if pytd is not None: ytd_named.append((e.get("label",tk), pytd))
 
-    # Fix: recount cleanly
-    green_1d = red_1d = na_1d = 0
-    for group, tickers in GROUPS.items():
-        for tk in tickers:
-            e = mkt.get(tk, {})
-            p1d = parse_pct(e.get("change_1d"))
-            if p1d is None: na_1d += 1
-            elif p1d > 0:   green_1d += 1
-            else:            red_1d   += 1
+    # 1D breadth from the shared single-source-of-truth helper (same as auto_regime),
+    # so Section 3's regime and this heatmap's tone can never contradict each other.
+    green_1d, red_1d, na_1d = _breadth(data)
 
     ytd_named.sort(key=lambda x: -x[1])
     best_ytd  = ytd_named[0]  if ytd_named else None
@@ -887,9 +959,29 @@ def crypto_narrative(data):
 
     ctx = []
     if dom is not None:      ctx.append(f"BTC dominance {dom:.1f}%")
-    if dvol_btc is not None: ctx.append(f"BTC implied vol (DVOL) {dvol_btc:.0f}")
+    if dvol_btc is not None:
+        vtag = "low/compressed" if dvol_btc < 40 else "elevated/stress" if dvol_btc > 60 else "normal"
+        ctx.append(f"BTC implied vol (DVOL) {dvol_btc:.0f} — {vtag}")
     if btc_ls is not None:   ctx.append(f"BTC long/short ratio {btc_ls:.2f}")
     if ctx: parts.append("**Context:** " + ", ".join(ctx) + ".")
+
+    # Forward-looking cue — parity with the macro narrative + every chart analysis.
+    fund_pos       = btc_fund is not None and btc_fund > 0
+    oi_rising       = btc_oi_1d is not None and btc_oi_1d > 2
+    stable_falling = stable_1w is not None and stable_1w < -0.3
+    if fund_pos and oi_rising and stable_falling:
+        watch = ("leverage building without fresh liquidity (funding + OI rising, stablecoin "
+                 "supply contracting) — fragile, prone to sharp mean-reversion.")
+    elif btc_fund is not None and btc_fund < 0:
+        watch = ("shorts crowded into a stable tape (negative funding) — short-squeeze fuel "
+                 "building; a push higher can force rapid covering.")
+    elif dvol_btc is not None and dvol_btc < 40 and btc_fund is not None and abs(btc_fund) < 0.02:
+        watch = ("compressed implied vol + balanced positioning — coiled; watch for a "
+                 "volatility expansion to set direction.")
+    else:
+        watch = ("no extreme in funding, leverage, or liquidity — monitor for funding flipping "
+                 "sign or stablecoin supply turning, which usually leads the next directional move.")
+    parts.append(f"**⚡ Watch for:** {watch}")
 
     return "\n\n".join(parts)
 
@@ -920,9 +1012,13 @@ def chart_analysis_crypto(data, fname):
         if eth_fund is not None: line += f"; ETH {eth_fund:+.3f}%/8h"
         lines.append(line)
     if btc_oi is not None:
+        btc_oi_30d = data.get("crypto_data", {}).get("BTC_oi", {}).get("change_30d")
         t = f"- **Open interest:** BTC ${btc_oi/1e9:.1f}B"
         if eth_oi is not None: t += f", ETH ${eth_oi/1e9:.1f}B"
-        if btc_oi_1d is not None: t += f" (BTC {btc_oi_1d:+.1f}% 1D)"
+        seg = []
+        if btc_oi_1d is not None: seg.append(f"{btc_oi_1d:+.1f}% 1D")
+        if btc_oi_30d and btc_oi_30d != "N/A": seg.append(f"{btc_oi_30d} 30D")
+        if seg: t += f" (BTC {', '.join(seg)})"
         lines.append(t)
     if btc_ls is not None:
         t = f"- **Long/Short account ratio:** BTC {btc_ls:.2f}"
@@ -937,6 +1033,60 @@ def chart_analysis_crypto(data, fname):
         watch = "Funding negative — shorts crowded; a squeeze higher forces short-covering and can accelerate quickly."
     else:
         watch = "Watch for funding flipping sign or OI spiking while price stalls — both often precede liquidation cascades."
+    lines += ["", f"**⚡ Watch for:** {watch}", ""]
+    return "\n".join(lines)
+
+
+def chart_analysis_crypto_liquidity(data, fname):
+    cd = data.get("crypto_data", {})
+    stable      = _crypto_val(data, "stablecoin_supply")
+    stable_1w   = parse_pct(cd.get("stablecoin_supply", {}).get("change_1w"))
+    dvol_btc    = _crypto_val(data, "BTC_dvol")
+    dvol_eth    = _crypto_val(data, "ETH_dvol")
+    dvol_btc_1d = parse_pct(cd.get("BTC_dvol", {}).get("change_1d"))
+
+    lines = ["### 📊 Chart 5: Crypto Liquidity & Volatility\n",
+             f"![Chart 5]({fname})\n",
+             "**What this chart shows:**  ",
+             "Top panel: **total stablecoin supply** — the dry-powder liquidity sitting on "
+             "exchanges and in wallets, ready to rotate into risk assets. Its *direction* matters "
+             "more than its level: rising supply = fresh capital entering the system (a tailwind "
+             "for risk-on continuation); falling supply = capital leaving (a headwind that makes "
+             "breakouts prone to failure). Bottom panel: **DVOL** — Deribit's crypto implied-"
+             "volatility index, the crypto-native analogue of the equity VIX. Low DVOL = "
+             "calm/complacency (often precedes a volatility expansion); high DVOL = stress/fear "
+             "(often near capitulation). Dashed lines mark the compressed (40) and elevated (60) "
+             "regime thresholds.\n",
+             "**Key Observations:**"]
+
+    if stable is not None:
+        trend = "rising" if (stable_1w or 0) > 0.3 else "contracting" if (stable_1w or 0) < -0.3 else "roughly flat"
+        wow   = f" ({stable_1w:+.2f}% WoW)" if stable_1w is not None else ""
+        tail  = ("fresh dry powder, supportive for risk-on" if trend == "rising"
+                 else "liquidity leaving, caution on breakouts" if trend == "contracting"
+                 else "liquidity steady")
+        lines.append(f"- **Stablecoin supply:** ${stable/1e9:.0f}B, {trend}{wow} — {tail}")
+    if dvol_btc is not None:
+        regime = "low/compressed" if dvol_btc < 40 else "elevated/stress" if dvol_btc > 60 else "normal"
+        line = f"- **DVOL (implied vol):** BTC {dvol_btc:.0f} — {regime}"
+        if dvol_eth is not None:    line += f"; ETH {dvol_eth:.0f}"
+        if dvol_btc_1d is not None: line += f" (BTC {dvol_btc_1d:+.1f}% 1D)"
+        lines.append(line)
+    if stable is None and dvol_btc is None:
+        lines.append("- Crypto liquidity / vol data unavailable — see Section 6 for flags.")
+
+    if   dvol_btc is not None and dvol_btc < 40:
+        watch = ("DVOL compressed (<40) — vol regimes mean-revert, so a compression like this often "
+                 "precedes a breakout; the direction usually follows funding + stablecoin flow.")
+    elif dvol_btc is not None and dvol_btc > 60:
+        watch = ("DVOL elevated (>60) — stress/capitulation territory; spikes here often mark local "
+                 "exhaustion, but confirm with stablecoin supply before fading.")
+    elif stable_1w is not None and stable_1w < -0.3:
+        watch = ("Stablecoin supply contracting while price holds — unsustainable; watch for "
+                 "follow-through failure on any breakout.")
+    else:
+        watch = ("Track stablecoin direction (liquidity) against DVOL (vol regime) — a turn in either "
+                 "typically leads the next sustained move.")
     lines += ["", f"**⚡ Watch for:** {watch}", ""]
     return "\n".join(lines)
 
@@ -969,7 +1119,7 @@ def build_markdown(data, today, chart_paths):
         disp = fmt_crypto_val(e) if section == "crypto_data" else fmt_val(e["value"])
         sf   = stale_flag(e)
         lines.append(f"| {e.get('label',key)}{sf} | {disp} | "
-                     f"{e.get('change_1d','N/A')} | {e.get('change_ytd','N/A')} | "
+                     f"{e.get('change_1d','N/A')} | {fmt_longterm(e)} | "
                      f"{e.get('as_of','N/A')} | {src} |")
     lines.append("\n*⚠ = value older than freshness threshold. All changes are from prior reading.*\n")
 
@@ -983,7 +1133,8 @@ def build_markdown(data, today, chart_paths):
               chart_analysis_equity(data, chart_paths[0].name),
               chart_analysis_rates(data, chart_paths[1].name),
               chart_analysis_heatmap(data, chart_paths[2].name),
-              chart_analysis_crypto(data, chart_paths[3].name)]
+              chart_analysis_crypto(data, chart_paths[3].name),
+              chart_analysis_crypto_liquidity(data, chart_paths[4].name)]
 
     lines += ["---\n\n## 5. Forward Calendar (Next 14 Days)\n"]
     raw_cal = data.get("calendar", [])
@@ -1104,7 +1255,7 @@ def build_pdf(data, today, md_text, chart_paths):
         rows.append([f"{e.get('label',key)}{sf}",
                      disp,
                      str(e.get("change_1d","N/A"))[:14],
-                     str(e.get("change_ytd","N/A"))[:14],
+                     str(fmt_longterm(e))[:14],
                      e.get("as_of","N/A")])
 
     if len(rows) > 1:
@@ -1145,11 +1296,13 @@ def build_pdf(data, today, md_text, chart_paths):
     chart_titles = ["Chart 1: Major Equity Indices — 30-day normalized",
                     "Chart 2: US Rates & Yields — 30-day trend",
                     "Chart 3: Cross-Asset Performance Heatmap",
-                    "Chart 4: Crypto Derivatives — Funding & Open Interest"]
+                    "Chart 4: Crypto Derivatives — Funding & Open Interest",
+                    "Chart 5: Crypto Liquidity & Volatility"]
     analyses = [chart_analysis_equity(data,  chart_paths[0].name),
                 chart_analysis_rates(data,   chart_paths[1].name),
                 chart_analysis_heatmap(data, chart_paths[2].name),
-                chart_analysis_crypto(data,  chart_paths[3].name)]
+                chart_analysis_crypto(data,  chart_paths[3].name),
+                chart_analysis_crypto_liquidity(data, chart_paths[4].name)]
     # Fit each chart into a bounding box while preserving its native aspect
     # ratio, so square-ish charts (e.g. the heatmap) are not stretched flat.
     max_w, max_h = 16.5*cm, 9.5*cm
@@ -1261,8 +1414,10 @@ def main():
     print(f"  Chart 3 (heatmap)  {'✓ with change data' if ok3 else '⚠ 1D changes N/A (live fetch failed)'}")
     c4, ok4 = chart_crypto_derivatives(data, today, footer)
     print(f"  Chart 4 (crypto)   {'✓ with derivatives data' if ok4 else '⚠ no crypto history (fetch failed)'}")
+    c5, ok5 = chart_crypto_liquidity(data, today, footer)
+    print(f"  Chart 5 (liq/vol)  {'✓ with liquidity/vol data' if ok5 else '⚠ no crypto liq/vol history'}")
 
-    chart_paths = [c1, c2, c3, c4]
+    chart_paths = [c1, c2, c3, c4, c5]
 
     md = build_markdown(data, today, chart_paths)
     md_path = REPORTS_DIR / f"econ-insight_{today}.md"

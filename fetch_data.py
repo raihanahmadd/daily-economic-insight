@@ -626,11 +626,16 @@ def _http_get_json(url: str, headers: dict = None, attempts: int = 3):
 
 
 def _crypto_entry(label, category, points, unit, source, source_url,
-                  cadence_days, as_of_ts, no_ytd=False):
+                  cadence_days, as_of_ts, no_ytd=False, add_30d=False):
     """
     Build a crypto data point in the same shape as fred_data/market_data entries.
     `points` is a list of (epoch_seconds, value); compute_baselines() does the rest.
     Funding/LS ratios have no meaningful YTD/1Y baseline → no_ytd sets them to N/A.
+
+    add_30d: for sources whose history is capped below 1 year (e.g. Binance OI ~30d,
+    DVOL/stablecoin ~30-60d), compute_baselines' "YTD" is really just a ~30-day change
+    dated to the start of the window — materially misleading. add_30d replaces it with
+    an honest `change_30d` (true 30-day lookback) and sets change_ytd/1y to N/A.
     """
     import pandas as pd
     idx    = pd.to_datetime([p[0] for p in points], unit="s")
@@ -640,9 +645,15 @@ def _crypto_entry(label, category, points, unit, source, source_url,
 
     baselines = compute_baselines(series, unit=unit)
     baselines["cadence_days"] = cadence_days  # explicit (intraday gaps infer poorly)
-    if no_ytd:
+    if no_ytd or add_30d:
         baselines["change_ytd"] = "N/A"
         baselines["change_1y"]  = "N/A"
+    if add_30d:
+        delta_fn = bps_change if unit == "percent" else pct_change
+        target   = series.index[-1] - pd.Timedelta(days=30)
+        past     = series[series.index <= target]
+        ref      = past.iloc[-1] if not past.empty else series.iloc[0]
+        baselines["change_30d"] = delta_fn(float(series.iloc[-1]), float(ref))
 
     freshness = check_freshness(baselines["as_of"], category, cadence_days, as_of_ts)
     return {
@@ -713,7 +724,7 @@ def fetch_crypto_data() -> dict:
             entry = _crypto_entry(
                 f"{tag} Open Interest (USD)", "crypto_derivatives", pts, "price",
                 "Binance Futures", "https://www.binance.com/en/futures",
-                cadence_days=1, as_of_ts=pts[-1][0])
+                cadence_days=1, as_of_ts=pts[-1][0], add_30d=True)  # OI history ~30d, not YTD
             results[f"{tag}_oi"] = entry
             log.info(f"  Binance OI {tag:4s} → ${entry['value']/1e9:.2f}B  1D: {entry['change_1d']}")
         except Exception as e:
@@ -739,7 +750,9 @@ def fetch_crypto_data() -> dict:
                                           "category": "crypto_derivatives", "error": str(e)}
 
     # ── Tier 2a: Deribit DVOL implied-volatility index (BTC, ETH) ──
-    now_ms = int(datetime.now().timestamp() * 1000)
+    # Use time.time() (unambiguous UTC epoch) — the rest of the script is JST-aware,
+    # and a naive datetime.now() would shift the window on a non-JST server.
+    now_ms   = int(time.time() * 1000)
     start_ms = now_ms - 60 * 24 * 3600 * 1000  # 60 days back
     for cur in ("BTC", "ETH"):
         try:
@@ -751,7 +764,7 @@ def fetch_crypto_data() -> dict:
             entry = _crypto_entry(
                 f"{cur} DVOL (implied vol)", "crypto_vol", pts, "index",
                 "Deribit", f"https://www.deribit.com/statistics/{cur}/volatility-index",
-                cadence_days=0.5, as_of_ts=pts[-1][0])
+                cadence_days=0.5, as_of_ts=pts[-1][0], no_ytd=True)  # ~30-60d history, not YTD
             results[f"{cur}_dvol"] = entry
             log.info(f"  Deribit DVOL {cur:4s} → {entry['value']:.1f}  1D: {entry['change_1d']}")
         except Exception as e:
@@ -771,7 +784,7 @@ def fetch_crypto_data() -> dict:
         entry = _crypto_entry(
             "Stablecoin Supply (total)", "crypto_liquidity", pts, "price",
             "DeFiLlama", "https://defillama.com/stablecoins",
-            cadence_days=1, as_of_ts=pts[-1][0])
+            cadence_days=1, as_of_ts=pts[-1][0], no_ytd=True)  # ~60d history, not YTD
         results["stablecoin_supply"] = entry
         log.info(f"  DeFiLlama stablecoin supply → ${entry['value']/1e9:.1f}B  1W: {entry['change_1w']}")
     except Exception as e:
@@ -1011,7 +1024,7 @@ def main() -> dict:
             "date":             TODAY,
             "generated_jst":    ts_now(),
             "timezone":         "Asia/Tokyo (JST, UTC+9)",
-            "script_version":   "1.2.0",
+            "script_version":   "1.3.0",
             "prior_state_date": prior_state.get("date", "none — first run"),
             "output_contract":  "v2",
         },
