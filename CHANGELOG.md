@@ -65,3 +65,38 @@ All notable fixes and enhancements to the Daily Economic Intelligence Report pip
 - Added `README.md`, `CHANGELOG.md`, `.gitignore`, and `.env.example`.
 - `.gitignore` excludes the secret `.env`, the virtualenv, local settings, and regenerated
   `logs/` + `data/`.
+
+---
+
+## Round 5 — Crypto-native quant data layer (fetch_data.py v1.2.0)
+
+New top-level `crypto_data` key + Chart 4, same Output Contract shape as the macro layers.
+
+- **Tier 1** (Binance/Bybit, no key): perp funding rate (BTC/ETH) + Bybit funding
+  cross-check, open interest, long/short account ratio.
+- **Tier 2**: Deribit DVOL implied vol, DeFiLlama total stablecoin supply, CoinGecko
+  BTC dominance + ETH/BTC (works keyless, honors optional `COINGECKO_API_KEY`).
+- **Tier 3**: spot ETF net-flow stub (no free API); `DFII10` 10Y real yield added to FRED.
+- `check_freshness` extended for sub-day/hourly cadence via `as_of_ts`; wired into
+  `validate_output`, `save_state`, and `main()` (`[Step 4/8]`).
+- `render_report.py`: Chart 4 (funding + OI), "Crypto Market Structure" narrative
+  subsection, crypto dashboard rows with `$B` / `%` formatting.
+
+---
+
+## Round 6 — Crypto patch v2 (fetch_data.py v1.3.0, render_report.py v2.1)
+
+Bug fixes + additive crypto rendering (non-destructive — Charts 1-4 unchanged).
+
+- **Fix:** Open Interest "YTD" was really a ~30-day change (Binance caps history at ~30d) →
+  now `no_ytd` + an honest `change_30d` field, shown as "(30D)". DVOL/stablecoin also moved
+  to `no_ytd` (their history is < 1 year too).
+- **Fix:** `auto_regime()` ignored market breadth and could contradict the heatmap. Added a
+  single shared `_breadth()` helper used by `auto_regime`, `auto_conclusion`, and the heatmap
+  analysis — one source of truth, no more contradictions.
+- **Fix:** DVOL fetch used a naive `datetime.now()` → switched to `time.time()` (UTC epoch).
+- **Add:** Chart 5 (stablecoin supply + DVOL) with full analysis; a "⚡ Watch for" line on the
+  Crypto Market Structure narrative; a DVOL regime tag (low/normal/elevated); and L/S ratio,
+  DVOL, and ETH/BTC rows in the dashboard.
+- **Known limitation:** BTC dominance / ETH-BTC still ship N/A deltas (CoinGecko `/global` is
+  snapshot-only); a self-built history accumulator was deferred.
